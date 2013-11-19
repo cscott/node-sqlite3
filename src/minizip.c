@@ -1,14 +1,17 @@
 #include <assert.h>
-
-#include <zlib/zlib.h>
-#include <zlib/contrib/minizip/ioapi.h>
-#include <zlib/contrib/minizip/unzip.h>
-
 #include <stdio.h>
+
+#if defined(USE_SYSTEM_ZLIB)
+#include <zlib.h>
+#else
+#include "zlib.h"
+#endif
+#include "unzip.h"
+
 #include <sqlite3.h>
 #include "minizip.h"
 
-#if 0
+#if 1
 void minizip_init(void) {
     unzFile uz;
     uz = unzOpen("foo.zip");

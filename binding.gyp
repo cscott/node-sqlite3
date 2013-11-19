@@ -25,10 +25,15 @@
       'include_dirs': [
           '<(node_root_dir)/deps'
       ],
+      'libraries': [
+          '-lz'
+      ],
       'sources': [
         'src/database.cc',
         'src/node_sqlite3.cc',
         'src/statement.cc',
+        'src/ioapi.c',
+        'src/unzip.c',
         'src/minizip.c'
       ],
     }
