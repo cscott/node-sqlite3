@@ -10,18 +10,23 @@
 #include "macros.h"
 #include "database.h"
 #include "statement.h"
+#include "minizip.h"
 
 using namespace node_sqlite3;
 
 namespace {
 
 void RegisterModule(v8::Handle<Object> target) {
+    sqlite3_initialize();
+    sqlite3_unzipper_initialize(NULL, 0);
+
     Database::Init(target);
     Statement::Init(target);
 
     DEFINE_CONSTANT_INTEGER(target, SQLITE_OPEN_READONLY, OPEN_READONLY);
     DEFINE_CONSTANT_INTEGER(target, SQLITE_OPEN_READWRITE, OPEN_READWRITE);
     DEFINE_CONSTANT_INTEGER(target, SQLITE_OPEN_CREATE, OPEN_CREATE);
+    DEFINE_CONSTANT_INTEGER(target, SQLITE_OPEN_URI, OPEN_URI);
     DEFINE_CONSTANT_STRING(target, SQLITE_VERSION, VERSION);
 #ifdef SQLITE_SOURCE_ID
     DEFINE_CONSTANT_STRING(target, SQLITE_SOURCE_ID, SOURCE_ID);
