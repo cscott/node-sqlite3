@@ -1,5 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 
 #if defined(USE_SYSTEM_ZLIB)
 #include <zlib.h>
@@ -11,14 +13,6 @@
 #include <sqlite3.h>
 #include "minizip.h"
 
-#if 1
-void minizip_init(void) {
-    unzFile uz;
-    uz = unzOpen("foo.zip");
-    unzClose(uz);
-}
-#endif
-
 /************************ Shim Definitions ******************************/
 
 #ifndef SQLITE_UNZIP_VFS_NAME
@@ -26,32 +20,19 @@ void minizip_init(void) {
 #endif
 
 /*
-** An instance of this structure is attached to the each unzipper VFS to
-** provide auxiliary information.
-*/
-typedef struct unzipper_info unzipper_info;
-struct unzipper_info {
-  sqlite3_vfs *pRootVfs;              /* The underlying real VFS */
-    // XXX info on this vfs (zip files?)
-    const char *zVfsName;               /* Name of this trace-VFS */
-    sqlite3_vfs *pUnzipperVfs;          /* Pointer back to the unzipper VFS */
-};
-
-/*
 ** The sqlite3_file object for the unzipper VFS
 */
 typedef struct unzipper_file unzipper_file;
 struct unzipper_file {
     sqlite3_file base;        /* Base class.  Must be first */
-    unzipper_info *pInfo;     /* The unzipper-VFS to which this file belongs */
-    const char *zFName;       /* Base name of the file */
-    sqlite3_file *pReal;      /* The real underlying file */
+    unzFile zipfile;          /* The zip file containing the db */
+    unz_file_pos start;       /* the start of the current file */
+    sqlite3_int64 pos;        /* our position within that file */
 };
 
 /*
 ** Method declarations for unzipper_file.
 */
-#if 0
 static int unzipperClose(sqlite3_file*);
 static int unzipperRead(sqlite3_file*, void*, int iAmt, sqlite3_int64 iOfst);
 static int unzipperWrite(sqlite3_file*,const void*,int iAmt, sqlite3_int64);
@@ -64,6 +45,7 @@ static int unzipperCheckReservedLock(sqlite3_file*, int *);
 static int unzipperFileControl(sqlite3_file*, int op, void *pArg);
 static int unzipperSectorSize(sqlite3_file*);
 static int unzipperDeviceCharacteristics(sqlite3_file*);
+#if 0
 static int unzipperShmLock(sqlite3_file*,int,int,int);
 static int unzipperShmMap(sqlite3_file*,int,int,int, void volatile **);
 static void unzipperShmBarrier(sqlite3_file*);
@@ -137,6 +119,153 @@ static struct {
 
 
 /** SHIMS! **/
+static int unzipperClose(
+  sqlite3_file *pFile
+) {
+    unzipper_file *p = (unzipper_file *)pFile;
+    if (p->zipfile) {
+        unzCloseCurrentFile(p->zipfile);
+        unzClose(p->zipfile);
+        p->zipfile = NULL;
+    }
+    return SQLITE_OK;
+}
+static int unzipperRead(
+  sqlite3_file *pFile, void *zBuf, int iAmt, sqlite3_int64 iOfst
+) {
+    unzipper_file *p = (unzipper_file *)pFile;
+    int rc;
+    if (iOfst != p->pos) {
+        // XXX improve seek in uncompressed files
+        if (iOfst < p->pos) {
+            unzCloseCurrentFile(p->zipfile);
+            unzGoToFilePos(p->zipfile, &(p->start));
+            unzOpenCurrentFile(p->zipfile);
+            p->pos = 0;
+        }
+        char buf[1024];
+        while (p->pos < iOfst) {
+            sqlite3_int64 sz = iOfst - p->pos;
+            if (sz > sizeof(buf)) { sz = sizeof(buf); }
+            rc = unzipperRead(pFile, buf, sz, p->pos);
+            if (!(rc == SQLITE_OK || rc == SQLITE_IOERR_SHORT_READ)) {
+                return rc;
+            }
+        }
+    }
+    rc = unzReadCurrentFile(p->zipfile, zBuf, iAmt);
+    if (rc < 0) {
+        return SQLITE_IOERR;
+    }
+    p->pos += rc;
+    if (rc == iAmt) {
+        return SQLITE_OK;
+    }
+    return SQLITE_IOERR_SHORT_READ;
+}
+static int unzipperWrite(
+  sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int64 iOfst
+) {
+    return SQLITE_READONLY;
+}
+static int unzipperTruncate(
+  sqlite3_file *pFile, sqlite3_int64 size
+) {
+    return SQLITE_READONLY;
+}
+static int unzipperSync(
+  sqlite3_file *pFile, int flags
+) {
+    return SQLITE_OK;
+}
+static int unzipperFileSize(
+  sqlite3_file *pFile, sqlite3_int64 *pSize
+) {
+    unzipper_file *p = (unzipper_file *)pFile;
+    unz_file_info info;
+    int rc;
+
+    rc = unzGetCurrentFileInfo(p->zipfile, &info, NULL, 0, NULL, 0, NULL, 0);
+    if (rc != SQLITE_OK) {
+        return SQLITE_IOERR_FSTAT;
+    }
+    *pSize = info.uncompressed_size;
+    return SQLITE_OK;
+}
+static int unzipperLock(
+  sqlite3_file *pFile, int eLock
+) {
+    return SQLITE_OK;
+}
+static int unzipperUnlock(
+  sqlite3_file *pFile, int eLock
+) {
+    return SQLITE_OK;
+}
+static int unzipperCheckReservedLock(
+  sqlite3_file *pFile, int *pResOut
+) {
+    *pResOut = 0;
+    return SQLITE_OK;
+}
+
+static int unzipperFileControl(
+  sqlite3_file *pFile, int op, void *pArg
+) {
+    return SQLITE_OK;
+}
+static int unzipperSectorSize(
+  sqlite3_file *pFile
+) {
+    return 0;
+}
+static int unzipperDeviceCharacteristics(
+  sqlite3_file *pFile
+) {
+    return 0;
+}
+
+static int unzipperOpenZip(
+  sqlite3_vfs *pOrigVfs,
+  const char *zZipName,
+  const char *zDbName,
+  sqlite3_file *pFile,
+  int flags,
+  int *pOutFlags
+){
+    unzipper_file *pUnzipFile;
+    int method, level;
+    int rc;
+    /* Attempt to open this zip file! */
+    // xxx could use unzOpen2 and pass in proxied versions of the VFS funcs
+    unzFile unz = unzOpen( zZipName );
+    if (!unz) {
+        return SQLITE_CANTOPEN;
+    }
+    /* Attempt to find the named database */
+    rc = unzLocateFile(unz, zDbName, 0);
+    if (rc != UNZ_OK) {
+        unzClose(unz);
+        return SQLITE_CANTOPEN;
+    }
+    /* Open and ensure that the file is not compressed */
+    rc = unzOpenCurrentFile2(unz, &method, &level, 0);
+    if (rc != UNZ_OK) {
+        unzClose(unz);
+        return SQLITE_CANTOPEN;
+    }
+    /* Ok! Let's return a wrapped file */
+    pUnzipFile = (unzipper_file *) pFile;
+    pUnzipFile->zipfile = unz;
+    unzGetFilePos(unz, &(pUnzipFile->start));
+    pUnzipFile->pos = 0;
+    pUnzipFile->base.pMethods = &(gUnzipper.sIoMethodsV1);
+    if ( pOutFlags ) {
+        *pOutFlags = flags;
+    }
+    return SQLITE_OK;
+}
+
 static int unzipperOpen(
   sqlite3_vfs *pVfs,
   const char *zName,
@@ -158,8 +287,28 @@ static int unzipperOpen(
 
     /* Otherwise, this is an unzipped file */
     fprintf(stderr, " A main database file or WAL!\n");
-    // xx use normal xOpen for now
-    rc = pOrigVfs->xOpen(pOrigVfs, zName, pFile, flags, pOutFlags);
+
+    if( (flags & SQLITE_OPEN_READONLY) == 0 ) {
+        return SQLITE_CANTOPEN;
+    }
+
+    // split on '/', find the zip
+    const char *p = zName + strlen(zName); // pointing at trailing \0
+    char *prefix = strdup(zName);
+    rc = SQLITE_CANTOPEN;
+    for ( ; zName < p /* at least one char in prefix */; p--) {
+        if (*p == '/') {
+            // try splitting string here
+            prefix[p-zName] = '\0';
+            rc = unzipperOpenZip(pOrigVfs, prefix, p+1, pFile, flags, pOutFlags);
+            if (rc == SQLITE_OK) {
+                // we were successful!
+                break;
+            }
+        }
+    }
+    // couldn't open the file as a zip.
+    free(prefix);
     return rc;
 }
 
@@ -189,10 +338,10 @@ int sqlite3_unzipper_initialize(const char *zOrigVfsName, int makeDefault) {
   gUnzipper.pOrigVfs = pOrigVfs;
   gUnzipper.sThisVfs = *pOrigVfs;
   gUnzipper.sThisVfs.xOpen = unzipperOpen;
-  //gUnzipper.sThisVfs.xDelete = unzipperDelete;
   gUnzipper.sThisVfs.szOsFile += sizeof(unzipper_file);
   gUnzipper.sThisVfs.zName = SQLITE_UNZIP_VFS_NAME;
   /*
+  gUnzipper.sThisVfs.xDelete = unzipperDelete;
   gUnzipper.sThisVfs.xAccess = unzipperAccess;
   gUnzipper.sThisVfs.xFullPathname = unzipperFullPathname;
   gUnzipper.sThisVfs.xDlOpen = unzipperDlOpen;
@@ -207,7 +356,6 @@ int sqlite3_unzipper_initialize(const char *zOrigVfsName, int makeDefault) {
   */
 
   gUnzipper.sIoMethodsV1.iVersion = 1;
-  /*
   gUnzipper.sIoMethodsV1.xClose = unzipperClose;
   gUnzipper.sIoMethodsV1.xRead = unzipperRead;
   gUnzipper.sIoMethodsV1.xWrite = unzipperWrite;
@@ -221,7 +369,7 @@ int sqlite3_unzipper_initialize(const char *zOrigVfsName, int makeDefault) {
   gUnzipper.sIoMethodsV1.xSectorSize = unzipperSectorSize;
   gUnzipper.sIoMethodsV1.xDeviceCharacteristics =
                                             unzipperDeviceCharacteristics;
-  */
+
   gUnzipper.sIoMethodsV2 = gUnzipper.sIoMethodsV1;
   gUnzipper.sIoMethodsV2.iVersion = 2;
   /*
